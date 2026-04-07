@@ -166,6 +166,29 @@ _parallel_pool_max_workers: Optional[int] = None
 _running_job_ids: set = set()
 _running_lock = threading.Lock()
 
+# LOCAL-PATCH (fadak fork only — survives upstream sync via rebase)
+# Inference-layer failures (provider DNS unresolvable, network down, provider 5xx,
+# stream drop) manifest as a literal `final_response` string from run_agent.py.
+# These are infrastructure noise, not agent output, and must NEVER be delivered
+# to the user-facing chat — otherwise every transient network blip turns into
+# Discord spam (observed during 2026-04-08 Tailscale DNS outage: ~30 board-*
+# crons spammed the channel with the same line in 60 minutes).
+# Output is still saved to ~/.hermes/cron/output for debugging.
+INFERENCE_FAILURE_PREFIXES = (
+    "API call failed after",
+    "API call failed:",
+)
+
+def _is_inference_failure_response(text: str) -> bool:
+    if not text:
+        return False
+    stripped = text.strip()
+    return any(stripped.startswith(p) for p in INFERENCE_FAILURE_PREFIXES)
+
+
+# Resolve Hermes home directory (respects HERMES_HOME override)
+_hermes_home = get_hermes_home()
+
 # Sequential (env-mutating) cron jobs — workdir jobs that touch
 # process-global runtime state — must run one at a time, but must NOT block the
 # ticker thread.  A persistent single-thread executor preserves ordering across
@@ -2063,6 +2086,18 @@ def tick(verbose: bool = True, adapters=None, loop=None, sync: bool = True) -> i
                 should_deliver = bool(deliver_content.strip())
                 if should_deliver and success and SILENT_MARKER in deliver_content.strip().upper():
                     logger.info("Job '%s': agent returned %s — skipping delivery", job["id"], SILENT_MARKER)
+                    should_deliver = False
+                # LOCAL-PATCH (fadak): suppress inference-layer failure noise
+                # (DNS / 5xx / connection error). The literal "API call failed
+                # after N retries" string is the cron framework's own surfacing
+                # of an LLM call failure, not the agent's output. Delivering it
+                # spams the user with the same retry message every cron tick
+                # until the network recovers.
+                if should_deliver and _is_inference_failure_response(deliver_content):
+                    logger.warning(
+                        "Job '%s': inference layer failure ('%s...') — suppressing delivery",
+                        job["id"], deliver_content.strip()[:60],
+                    )
                     should_deliver = False
 
                 delivery_error = None
