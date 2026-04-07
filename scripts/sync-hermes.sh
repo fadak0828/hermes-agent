@@ -31,13 +31,36 @@ echo "=========================================="
 echo "  Hermes Sync — $(date '+%Y-%m-%d %H:%M:%S')"
 echo "=========================================="
 
+# ── Step 0: Snapshot LOCAL-PATCH commits before pull ────────────
+# Any commit on `main` whose subject contains [LOCAL-PATCH] is a fadak-fork
+# patch that MUST survive the sync. We snapshot the list before the pull and
+# verify after. If even one disappears (rebase silently dropped it, or upstream
+# coincidentally added an identical patch and git collapsed it), the script
+# aborts loudly so the user can investigate before later automation masks the
+# regression.
+PATCH_SNAPSHOT_BEFORE=$($GIT log --pretty='%s' --grep='\[LOCAL-PATCH\]' 2>/dev/null || true)
+PATCH_COUNT_BEFORE=$(printf '%s\n' "$PATCH_SNAPSHOT_BEFORE" | grep -c '\[LOCAL-PATCH\]' || true)
+if [[ "$PATCH_COUNT_BEFORE" -gt 0 ]]; then
+  echo ""
+  echo "[0/5] $PATCH_COUNT_BEFORE LOCAL-PATCH commit(s) tracked — must survive sync:"
+  printf '%s\n' "$PATCH_SNAPSHOT_BEFORE" | sed 's/^/  • /'
+fi
+
 # ── Step 1: Fetch upstream ──────────────────────────────────────
 echo ""
 echo "[1/5] Fetching upstream (NousResearch)..."
 $GIT fetch origin
 
 # Check if there are upstream changes
-LOCAL_AHEAD=$($GIT rev-list --count HEAD..origin/main 2>/dev/null || echo "0")
+# Use refs/remotes/origin/main explicitly to avoid being shadowed by a
+# (mis-named) local branch called origin/main that some user accidentally
+# created (e.g. via `git checkout origin/main`).
+if $GIT show-ref --verify --quiet refs/heads/origin/main; then
+  echo "  ⚠ WARNING: local branch 'origin/main' shadows the remote-tracking ref."
+  echo "    This was the cause of a silent sync failure on 2026-06-12."
+  echo "    Compare against real upstream:"
+fi
+LOCAL_AHEAD=$($GIT rev-list --count HEAD..refs/remotes/origin/main 2>/dev/null || echo "0")
 if [[ "$LOCAL_AHEAD" == "0" ]]; then
   echo "  ✓ Already up-to-date with upstream"
 else
@@ -55,16 +78,36 @@ else
   if !$GIT pull --ff-only origin main 2>/dev/null; then
     echo "  ⚠ Fast-forward failed. Checking for local commits..."
     # If we have local commits, rebase them on top of origin/main
-    LOCAL_COMMITS=$($GIT rev-list --count origin/main..HEAD 2>/dev/null || echo "0")
+    LOCAL_COMMITS=$($GIT rev-list --count refs/remotes/origin/main..HEAD 2>/dev/null || echo "0")
     if [[ "$LOCAL_COMMITS" -gt 0 ]]; then
       echo "  → Rebasing local changes onto new upstream..."
-      $GIT rebase origin/main || {
+      $GIT rebase refs/remotes/origin/main || {
         echo "  ⚠ Rebase conflict! Please resolve manually."
         exit 1
       }
     fi
   fi
   echo "  ✓ Fast-forward / rebase complete"
+fi
+
+# ── Step 2b: LOCAL-PATCH survival audit ─────────────────────────
+if [[ "$PATCH_COUNT_BEFORE" -gt 0 ]]; then
+  PATCH_SNAPSHOT_AFTER=$($GIT log --pretty='%s' --grep='\[LOCAL-PATCH\]' 2>/dev/null || true)
+  PATCH_COUNT_AFTER=$(printf '%s\n' "$PATCH_SNAPSHOT_AFTER" | grep -c '\[LOCAL-PATCH\]' || true)
+  if [[ "$PATCH_COUNT_AFTER" -lt "$PATCH_COUNT_BEFORE" ]]; then
+    echo ""
+    echo "  ❌ LOCAL-PATCH REGRESSION: $PATCH_COUNT_BEFORE → $PATCH_COUNT_AFTER commit(s)"
+    echo "  Missing:"
+    diff <(printf '%s\n' "$PATCH_SNAPSHOT_BEFORE" | sort) \
+         <(printf '%s\n' "$PATCH_SNAPSHOT_AFTER" | sort) \
+      | grep '^<' | sed 's/^< /    • /'
+    echo ""
+    echo "  This is unsafe to continue. Aborting sync."
+    echo "  Inspect: git reflog, git log --grep='[LOCAL-PATCH]'"
+    echo "  Backups: ~/.hermes/hermes-agent/cron/scheduler.py.bak.*"
+    exit 1
+  fi
+  echo "  ✓ All $PATCH_COUNT_AFTER LOCAL-PATCH commit(s) preserved"
 fi
 
 # ── Step 3: Sync tools ────────────────────────────────────────
@@ -92,7 +135,7 @@ fi
 # ── Step 4: Commit pushed skills ────────────────────────────────
 echo ""
 echo "[4/5] Checking for commit-worthy changes..."
-CHANGES=$($GIT status --porcelain board/ 'skills/productivity/paperclip-board/' 2>/dev/null | grep -v "^??")
+CHANGES=$($GIT status --porcelain board/ 'skills/productivity/paperclip-board/' 2>/dev/null | grep -v "^??" || true)
 if [[ -n "$CHANGES" ]]; then
   echo "  Changes found:"
   echo "$CHANGES"
