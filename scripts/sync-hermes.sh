@@ -67,7 +67,7 @@ else
   echo "  ✓ Fast-forward / rebase complete"
 fi
 
-# ── Step 3: Sync skills ────────────────────────────────────────
+# ── Step 3: Sync tools ────────────────────────────────────────
 echo ""
 echo "[3/5] Syncing bundled skills to ~/.hermes/skills/..."
 echo "  (User-modified skills are preserved — see .bundled_manifest)"
@@ -77,6 +77,16 @@ else
   cd "$REPO_DIR"
   source venv/bin/activate 2>/dev/null || true
   python3 "$SKILLS_SYNC"
+fi
+
+# Also copy check-korean.py to ~/.hermes/bin/ (if present in repo)
+if [[ -f "$REPO_DIR/scripts/check-korean.py" ]]; then
+  echo ""
+  echo "[3b/5] Syncing check-korean.py to ~/.hermes/bin/"
+  mkdir -p ~/.hermes/bin/
+  cp "$REPO_DIR/scripts/check-korean.py" ~/.hermes/bin/
+  chmod +x ~/.hermes/bin/check-korean.py
+  echo "  ✓ check-korean.py installed"
 fi
 
 # ── Step 4: Commit pushed skills ────────────────────────────────
